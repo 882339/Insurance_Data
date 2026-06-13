@@ -15,9 +15,8 @@ Il dataset utilizzato per questo progetto è **Car Insurance Data** ed è pubbli
 * **Descrizione:** Il dataset contiene informazioni sui clienti di una compagnia assicurativa, tra cui dati demografici, caratteristiche del veicolo, storico di guida e la variabile target `OUTCOME` (che indica se il cliente ha richiesto o meno un risarcimento).
 
 ## 📂 Struttura del Repository
-* `data/`: Contiene il file `Car_Insurance_Claim.csv` utilizzato per l'analisi.
-* `code/`: Contiene lo script `progetto_SIL.Rmd` (R Markdown) con tutto il codice R documentato passo dopo passo per la pulizia, l'analisi e la modellazione.
-* `report/`: Contiene il report finale (formato HTML/PDF) generato a partire dal file RMarkdown, strutturato per la discussione d'esame.
+* Lo script `progetto_SIL.Rmd` (R Markdown) con tutto il codice R documentato passo dopo passo per la pulizia, l'analisi e la modellazione.
+* Il report finale (formato HTML/PDF) generato a partire dal file RMarkdown, strutturato per la discussione d'esame.
 
 ## 🛠️ Tecnologie Utilizzate
 * **Linguaggio:** R
