@@ -1,0 +1,984 @@
+---
+title: "Car Insurance Claim Analysis"
+author: "Alessandro Simonato"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+
+library(tidyverse)
+library(janitor)
+library(car)
+library(MASS)
+library(pROC)
+library(caret)
+library(broom)
+library(patchwork)
+library(ggplot2)
+library(dplyr)
+library(mgcv)
+library(glmnet)
+library(knitr)
+
+set.seed(123)
+```
+
+# Dataset and Data Preparation
+
+The dataset used in this project is a car insurance claim dataset obtained from Kaggle. It contains 10,000 observations, where each row represents a policyholder. The dataset includes demographic, socioeconomic, driving-history and vehicle-related information.
+
+The response variable is `OUTCOME`. A value of `1` indicates that the policyholder filed an insurance claim during the observed period, while a value of `0` indicates that no claim was filed. Therefore, the objective of the analysis is to study which factors are associated with the probability of filing a claim.
+
+The explanatory variables include demographic and socioeconomic information such as `AGE`, `GENDER`, `RACE`, `EDUCATION`, `INCOME`, `MARRIED`, `CHILDREN`, `POSTAL_CODE` and `CREDIT_SCORE`; driving-related variables such as `DRIVING_EXPERIENCE`, `SPEEDING_VIOLATIONS`, `DUIS`, `PAST_ACCIDENTS` and `ANNUAL_MILEAGE`; and vehicle-related variables such as `VEHICLE_OWNERSHIP`, `VEHICLE_YEAR` and `VEHICLE_TYPE`.
+
+During data preparation, the identifier variable was removed because it does not provide useful statistical information for modelling. The response variable was converted into a binary factor with two levels: `No Claim` and `Claim`. Categorical predictors were also converted into factor variables. In particular, `POSTAL_CODE` was treated as categorical rather than numerical, since postal codes do not have a meaningful numerical order.
+
+The variables `CREDIT_SCORE` and `ANNUAL_MILEAGE` contained missing values. Since the dataset was sufficiently large, observations with missing values in these two variables were removed. The final cleaned dataset contains 8,149 observations.
+
+```{r data-preparation}
+raw <- read.csv("Car_Insurance_Claim.csv")
+
+# Remove ID variable because it does not provide useful information for modelling.
+data <- raw[, -1]
+
+# Convert categorical variables into factors.
+# AGE, DRIVING_EXPERIENCE and INCOME are kept as non-ordered factors in the modelling dataset.
+# This choice makes Odds Ratios directly interpretable as comparisons with a reference category.
+data <- data %>%
+  mutate(
+    OUTCOME = factor(
+      OUTCOME,
+      levels = c(0, 1),
+      labels = c("No Claim", "Claim")
+    ),
+    
+    AGE = factor(
+      AGE,
+      levels = c("16-25", "26-39", "40-64", "65+"),
+      ordered = FALSE
+    ),
+    
+    DRIVING_EXPERIENCE = factor(
+      DRIVING_EXPERIENCE,
+      levels = c("0-9y", "10-19y", "20-29y", "30y+"),
+      ordered = FALSE
+    ),
+    
+    GENDER = factor(GENDER),
+    RACE = factor(RACE),
+    EDUCATION = factor(EDUCATION),
+    
+    INCOME = factor(
+      INCOME,
+      levels = c("poverty", "working class", "middle class", "upper class"),
+      ordered = FALSE
+    ),
+    
+    VEHICLE_OWNERSHIP = factor(
+      VEHICLE_OWNERSHIP,
+      levels = c(0, 1),
+      labels = c("No", "Yes")
+    ),
+    
+    VEHICLE_YEAR = factor(VEHICLE_YEAR),
+    
+    MARRIED = factor(
+      MARRIED,
+      levels = c(0, 1),
+      labels = c("No", "Yes")
+    ),
+    
+    CHILDREN = factor(
+      CHILDREN,
+      levels = c(0, 1),
+      labels = c("No", "Yes")
+    ),
+    
+    POSTAL_CODE = factor(POSTAL_CODE),
+    VEHICLE_TYPE = factor(VEHICLE_TYPE)
+  )
+
+# Remove observations with missing values in CREDIT_SCORE and ANNUAL_MILEAGE.
+data_clean <- data %>%
+  drop_na(CREDIT_SCORE, ANNUAL_MILEAGE)
+
+dim(data_clean)
+prop.table(table(data_clean$OUTCOME))
+```
+
+After cleaning, approximately 31% of policyholders filed a claim, while approximately 69% did not. Therefore, the response variable is not severely imbalanced, making the dataset suitable for logistic regression analysis.
+
+# Exploratory Data Analysis
+
+The exploratory analysis was used to identify the main variables associated with claim occurrence before fitting the statistical models.
+
+```{r outcome-distribution, fig.cap="Distribution of insurance claims."}
+ggplot(data_clean, aes(x = OUTCOME)) +
+  geom_bar() +
+  labs(
+    title = "Distribution of insurance claims",
+    x = "Outcome",
+    y = "Number of policyholders"
+  ) +
+  theme_minimal()
+```
+
+The response distribution shows that both classes are sufficiently represented. Although `No Claim` is more frequent than `Claim`, the imbalance is not severe.
+
+```{r categorical-eda, fig.cap="Claim rate by age, driving experience, income and vehicle year."}
+p_age <- ggplot(data_clean, aes(x = AGE, fill = OUTCOME)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Age",
+    x = "",
+    y = "Proportion",
+    fill = "Outcome"
+  ) +
+  theme_minimal()
+
+p_exp <- ggplot(data_clean, aes(x = DRIVING_EXPERIENCE, fill = OUTCOME)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Driving experience",
+    x = "",
+    y = "Proportion",
+    fill = "Outcome"
+  ) +
+  theme_minimal()
+
+p_income <- ggplot(data_clean, aes(x = INCOME, fill = OUTCOME)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Income",
+    x = "",
+    y = "Proportion",
+    fill = "Outcome"
+  ) +
+  theme_minimal()
+
+p_vehicle <- ggplot(data_clean, aes(x = VEHICLE_YEAR, fill = OUTCOME)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Vehicle year",
+    x = "",
+    y = "Proportion",
+    fill = "Outcome"
+  ) +
+  theme_minimal()
+
+(p_age + p_exp) / (p_income + p_vehicle)
+```
+
+The categorical analysis shows that claim rates vary substantially across groups. Younger drivers and drivers with less experience show much higher claim frequencies. Income and vehicle year also show visible differences: lower-income policyholders and owners of vehicles manufactured before 2015 present higher claim rates.
+
+These are marginal relationships. A multivariable model is needed to understand which predictors remain relevant after controlling for the others.
+
+```{r numerical-eda, fig.cap="Distribution of numerical predictors by claim outcome."}
+plot1 <- ggplot(data_clean, aes(x = OUTCOME, y = ANNUAL_MILEAGE)) +
+  geom_boxplot() +
+  labs(title = "Annual mileage", x = "", y = "Annual mileage") +
+  theme_minimal()
+
+plot2 <- ggplot(data_clean, aes(x = OUTCOME, y = SPEEDING_VIOLATIONS)) +
+  geom_boxplot() +
+  labs(title = "Speeding violations", x = "", y = "Speeding violations") +
+  theme_minimal()
+
+plot3 <- ggplot(data_clean, aes(x = OUTCOME, y = DUIS)) +
+  geom_boxplot() +
+  labs(title = "DUIs", x = "", y = "DUIs") +
+  theme_minimal()
+
+plot4 <- ggplot(data_clean, aes(x = OUTCOME, y = PAST_ACCIDENTS)) +
+  geom_boxplot() +
+  labs(title = "Past accidents", x = "", y = "Past accidents") +
+  theme_minimal()
+
+(plot1 + plot2) / (plot3 + plot4)
+```
+
+Policyholders who filed a claim tend to drive more miles per year, supporting the idea that greater road exposure increases claim probability. Annual mileage is the numerical predictor showing the clearest difference between the two outcome groups.
+
+For SPEEDING_VIOLATIONS, DUIS, and PAST_ACCIDENTS, the interpretation is less straightforward. These variables are highly skewed and concentrated around zero, particularly DUIS, where most policyholders have no recorded events. While some marginal differences are visible, they are relatively small compared with the variation observed within each group.
+
+A possible explanation is confounding with driving experience. More experienced drivers have had more time to accumulate violations or past accidents, while at the same time being less likely to file a claim during the observed period. Therefore, these exploratory findings should be considered descriptive and will be further investigated using multivariable models.
+
+```{r eda-tables}
+# Claim rates by selected categorical variables.
+prop.table(table(data_clean$AGE, data_clean$OUTCOME), 1)
+prop.table(table(data_clean$DRIVING_EXPERIENCE, data_clean$OUTCOME), 1)
+prop.table(table(data_clean$INCOME, data_clean$OUTCOME), 1)
+prop.table(table(data_clean$VEHICLE_YEAR, data_clean$OUTCOME), 1)
+
+# Numerical summaries by outcome.
+aggregate(CREDIT_SCORE ~ OUTCOME, data = data_clean, summary)
+aggregate(ANNUAL_MILEAGE ~ OUTCOME, data = data_clean, summary)
+aggregate(SPEEDING_VIOLATIONS ~ OUTCOME, data = data_clean, summary)
+aggregate(DUIS ~ OUTCOME, data = data_clean, summary)
+aggregate(PAST_ACCIDENTS ~ OUTCOME, data = data_clean, summary)
+```
+
+Overall, the EDA suggests that age, driving experience, income, vehicle year and annual mileage are associated with claim occurrence. However, some relationships may be affected by confounding, so logistic regression models are needed to evaluate conditional effects.
+
+# Logistic Regression and Model Selection
+
+Since the response variable is binary, logistic regression was used to model the probability of filing an insurance claim.
+
+A first model including only `AGE` showed a strong negative association between age and claim occurrence: older drivers had substantially lower odds of filing a claim compared with drivers aged 16–25. However, when `DRIVING_EXPERIENCE` was added, the effect of age became weaker. This suggests that part of the apparent age effect observed in the EDA was actually explained by driving experience.
+
+```{r initial-logistic-models}
+# Model with AGE only.
+model_age <- glm(
+  OUTCOME ~ AGE,
+  data = data_clean,
+  family = binomial
+)
+
+summary(model_age)
+
+exp(cbind(
+  OR = coef(model_age),
+  confint(model_age)
+))
+
+# Model with AGE and DRIVING_EXPERIENCE.
+model_age_exp <- glm(
+  OUTCOME ~ AGE + DRIVING_EXPERIENCE,
+  data = data_clean,
+  family = binomial
+)
+
+summary(model_age_exp)
+```
+
+A third model was fitted including `AGE`, `DRIVING_EXPERIENCE`, `INCOME`, `CREDIT_SCORE` and `VEHICLE_YEAR`. This model was used to investigate whether the effects observed in the EDA remained relevant after controlling for other predictors.
+
+```{r partial-model-vif}
+model3 <- glm(
+  OUTCOME ~ AGE + DRIVING_EXPERIENCE + INCOME + CREDIT_SCORE + VEHICLE_YEAR,
+  data = data_clean,
+  family = binomial
+)
+
+summary(model3)
+
+exp(cbind(
+  OR = coef(model3),
+  confint(model3)
+))
+
+vif(model3)
+```
+
+The VIF values were low, suggesting that multicollinearity was not a major issue in this partial model.
+
+## Train/Test Split and Stepwise Selection
+
+The dataset was split into a training set and a test set. The training set was used to fit the models, while the test set was used to evaluate predictive performance.
+
+```{r train-test}
+set.seed(123)
+
+train_id <- sample(
+  1:nrow(data_clean),
+  0.7 * nrow(data_clean)
+)
+
+train <- data_clean[train_id, ]
+test  <- data_clean[-train_id, ]
+
+dim(train)
+dim(test)
+```
+
+A full logistic regression model was fitted using all available predictors. Then, stepwise model selection based on AIC was applied to obtain a simpler model.
+
+```{r full-stepwise-model}
+model_full <- glm(
+  OUTCOME ~ AGE + DRIVING_EXPERIENCE + GENDER + RACE + EDUCATION + INCOME +
+    CREDIT_SCORE + VEHICLE_OWNERSHIP + VEHICLE_YEAR + MARRIED + CHILDREN +
+    POSTAL_CODE + ANNUAL_MILEAGE + VEHICLE_TYPE + SPEEDING_VIOLATIONS +
+    DUIS + PAST_ACCIDENTS,
+  data = train,
+  family = binomial
+)
+
+model_step <- stepAIC(
+  model_full,
+  direction = "both",
+  trace = FALSE
+)
+
+summary(model_step)
+formula(model_step)
+```
+
+The selected model retained driving experience, gender, vehicle ownership, vehicle year, marital status, postal code and annual mileage.
+
+# Odds Ratio Interpretation
+
+After the stepwise selection, the coefficients of the final logistic regression model were transformed into Odds Ratios to improve interpretability. Values greater than 1 indicate higher odds of filing a claim, while values lower than 1 indicate lower odds.
+
+```{r odds-ratio-table}
+or_table <- tidy(model_step) %>%
+  mutate(
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error)
+  ) %>%
+  filter(term != "(Intercept)") %>%
+  dplyr::select(term, OR, conf.low, conf.high, p.value) %>%  # <--- LA MODIFICA È QUI
+  mutate(
+    OR = round(OR, 3),
+    conf.low = round(conf.low, 3),
+    conf.high = round(conf.high, 3),
+    p.value = round(p.value, 4)
+  ) %>%
+  rename(
+    Predictor = term,
+    `Odds Ratio` = OR,
+    `2.5%` = conf.low,
+    `97.5%` = conf.high,
+    `p-value` = p.value
+  )
+kable(
+  or_table,
+  caption = "Odds Ratios for the selected logistic regression model"
+)
+```
+
+Driving experience shows a strong protective effect. Compared with drivers with 0–9 years of experience, more experienced drivers have substantially lower odds of filing a claim. Male policyholders show higher odds of claim occurrence, while vehicle ownership is associated with lower odds. Vehicles manufactured before 2015 show substantially higher odds of claim occurrence compared with newer vehicles.
+
+Annual mileage has a positive effect. Since its Odds Ratio is computed for one additional mile, the value is close to 1. Interpreted over 1,000 additional miles, the effect becomes more meaningful.
+
+```{r mileage-or}
+exp(1000 * coef(model_step)["ANNUAL_MILEAGE"])
+```
+
+Postal code `21217` must be interpreted with caution. All observations in this category correspond to claims. For this reason, its coefficient and Odds Ratio are unstable and should not be interpreted literally.
+
+```{r postal-code-21217}
+table(data_clean$OUTCOME[data_clean$POSTAL_CODE == "21217"])
+```
+
+# Analysis Without POSTAL_CODE
+
+Since `POSTAL_CODE21217` showed a problem, an additional model was fitted without `POSTAL_CODE` to assess the robustness of the results.
+
+```{r no-postal-model}
+model_no_postal <- update(
+  model_step,
+  . ~ . - POSTAL_CODE
+)
+
+summary(model_no_postal)
+
+prob_no_postal <- predict(
+  model_no_postal,
+  newdata = test,
+  type = "response"
+)
+
+roc_no_postal <- roc(
+  test$OUTCOME,
+  prob_no_postal
+)
+
+auc(roc_no_postal)
+```
+
+The model without `POSTAL_CODE` retained the same main predictors: driving experience, gender, vehicle ownership, vehicle year, marital status and annual mileage. All these variables remained statistically significant and their effects were consistent with the main model.
+
+The AUC decreased to 0.906 after removing `POSTAL_CODE`, compared with approximately 0.926 for the model including it. This suggests that geographical information provides useful predictive signal. However, the main conclusions do not depend entirely on `POSTAL_CODE`, since the key predictors remained stable and the model still achieved good discriminative performance.
+
+# Model Diagnostics
+
+Diagnostic checks were performed on the selected logistic regression model. Deviance residuals were used to inspect the adequacy of the model, while Cook’s distance and leverage values were used to detect influential observations.
+
+```{r deviance-residuals, fig.cap="Deviance residuals versus fitted probabilities for the selected logistic regression model."}
+plot(
+  fitted(model_step),
+  residuals(model_step, type = "deviance"),
+  xlab = "Fitted probabilities",
+  ylab = "Deviance residuals"
+)
+
+abline(h = 0, col = "red")
+```
+
+The deviance residual plot shows the typical structure expected in logistic regression with a binary response. No clear systematic pattern is visible.
+
+```{r cooks-distance, fig.cap="Cook's distance for the selected logistic regression model."}
+cook <- cooks.distance(model_step)
+
+plot(
+  cook,
+  type = "h",
+  main = "Cook's Distance",
+  ylab = "Cook's distance",
+  xlab = "Observation index"
+)
+```
+
+Cook’s distance was used to identify observations that may have excessive influence on the estimated coefficients. Although some observations may exceed the conventional threshold (4/n), the overall values remain small, suggesting that the model is not dominated by single observations.
+
+```{r leverage, fig.cap="Leverage values for the selected logistic regression model."}
+lev <- hatvalues(model_step)
+
+plot(
+  lev,
+  type = "h",
+  main = "Leverage values",
+  ylab = "Leverage",
+  xlab = "Observation index"
+)
+```
+
+Leverage values were used to identify observations with unusual predictor combinations. Most values are low, suggesting no major leverage-related issue.
+
+```{r roc-step, fig.cap="ROC curve of the selected logistic regression model on the test set."}
+prob_step <- predict(
+  model_step,
+  newdata = test,
+  type = "response"
+)
+
+roc_step <- roc(
+  test$OUTCOME,
+  prob_step
+)
+
+auc(roc_step)
+
+plot(roc_step)
+```
+
+The ROC curve was computed on the test set, providing an out-of-sample measure of predictive performance. A high AUC indicates good discriminative ability between claim and no-claim observations.
+
+# Regularization: Ridge and Lasso
+
+Ridge and Lasso logistic regression models were fitted to assess the robustness of the variable selection process. Both methods introduce a penalty term in the estimation process. Ridge shrinks coefficients towards zero without removing variables, while Lasso can set some coefficients exactly equal to zero and therefore performs variable selection.
+
+```{r glmnet-matrices}
+x_all <- model.matrix(
+  OUTCOME ~ .,
+  data = data_clean
+)[, -1]
+
+y_all <- data_clean$OUTCOME
+
+x_train <- x_all[train_id, ]
+x_test  <- x_all[-train_id, ]
+
+y_train <- y_all[train_id]
+y_test  <- y_all[-train_id]
+```
+
+```{r ridge-model, fig.cap="Cross-validation curve for Ridge logistic regression."}
+cv_ridge <- cv.glmnet(
+  x_train,
+  y_train,
+  family = "binomial",
+  alpha = 0
+)
+
+plot(cv_ridge)
+
+cv_ridge$lambda.min
+coef(cv_ridge, s = "lambda.min")
+```
+
+Ridge regression confirmed the main findings of the logistic regression analysis. The largest effects were associated with driving experience, vehicle ownership, vehicle year, gender and postal code.
+
+```{r lasso-model, fig.cap="Cross-validation curve for Lasso logistic regression."}
+cv_lasso <- cv.glmnet(
+  x_train,
+  y_train,
+  family = "binomial",
+  alpha = 1
+)
+
+plot(cv_lasso)
+
+plot(cv_lasso$glmnet.fit, xvar = "lambda", main = "Lasso Coefficient Paths")
+
+coef_lasso <- coef(
+  cv_lasso,
+  s = "lambda.min"
+)
+
+coef_lasso[
+  coef_lasso[, 1] != 0,
+]
+```
+
+The Lasso model removed several weak predictors and retained variables largely consistent with the stepwise logistic regression model. This supports the robustness of the main conclusions.
+
+# Generalized Additive Model and Nonlinear Effects
+
+A Generalized Additive Model was fitted to investigate possible nonlinear effects among numerical predictors. Smoothing splines were applied to `CREDIT_SCORE`, `ANNUAL_MILEAGE` and `PAST_ACCIDENTS`.
+
+```{r gam-model, fig.cap="Smooth effects estimated by the Generalized Additive Model."}
+gam_model <- gam(
+  OUTCOME ~ s(CREDIT_SCORE) +
+    s(ANNUAL_MILEAGE) +
+    s(PAST_ACCIDENTS) +
+    DRIVING_EXPERIENCE +
+    GENDER +
+    VEHICLE_OWNERSHIP +
+    VEHICLE_YEAR +
+    MARRIED +
+    POSTAL_CODE,
+  family = binomial,
+  data = train
+)
+
+summary(gam_model)
+
+plot(
+  gam_model,
+  pages = 1,
+  shade = TRUE
+)
+```
+
+The GAM showed that `ANNUAL_MILEAGE` has the clearest nonlinear effect on claim probability. Credit score and past accidents did not provide strong nonlinear contributions once the other variables were included.
+
+# Final Model Comparison
+
+Finally, the predictive performance of the different models was compared using the Area Under the ROC Curve. All models were evaluated on the same test set in order to obtain a fair comparison.
+
+```{r final-comparison}
+# Logistic Full
+prob_full <- predict(
+  model_full,
+  newdata = test,
+  type = "response"
+)
+
+roc_full <- roc(
+  test$OUTCOME,
+  prob_full
+)
+
+# Stepwise Logistic
+prob_step <- predict(
+  model_step,
+  newdata = test,
+  type = "response"
+)
+
+roc_step <- roc(
+  test$OUTCOME,
+  prob_step
+)
+
+# Ridge
+prob_ridge <- predict(
+  cv_ridge,
+  newx = x_test,
+  s = "lambda.min",
+  type = "response"
+)
+
+roc_ridge <- roc(
+  y_test,
+  as.numeric(prob_ridge)
+)
+
+# Lasso
+prob_lasso <- predict(
+  cv_lasso,
+  newx = x_test,
+  s = "lambda.min",
+  type = "response"
+)
+
+roc_lasso <- roc(
+  y_test,
+  as.numeric(prob_lasso)
+)
+
+# GAM
+prob_gam <- predict(
+  gam_model,
+  newdata = test,
+  type = "response"
+)
+
+roc_gam <- roc(
+  test$OUTCOME,
+  prob_gam
+)
+
+results <- data.frame(
+  Model = c(
+    "Logistic Full",
+    "Logistic StepAIC",
+    "Ridge",
+    "Lasso",
+    "GAM"
+  ),
+  AUC = c(
+    as.numeric(auc(roc_full)),
+    as.numeric(auc(roc_step)),
+    as.numeric(auc(roc_ridge)),
+    as.numeric(auc(roc_lasso)),
+    as.numeric(auc(roc_gam))
+  )
+)
+
+kable(
+  results,
+  caption = "AUC comparison of models evaluated on the test set",
+  digits = 3
+)
+```
+
+```{r final-comparison-plot, fig.cap="Comparison of predictive models on the test set."}
+ggplot(
+  results,
+  aes(
+    x = reorder(Model, AUC),
+    y = AUC
+  )
+) +
+  geom_col(fill = "steelblue", color = "black") +
+  coord_flip() +
+  labs(
+    title = "Comparison of Predictive Models on Test Set",
+    x = "Model",
+    y = "Area Under the ROC Curve (AUC)"
+  ) +
+  theme_minimal()
+```
+
+The model comparison is based on AUC computed on the same test set. This ensures a fair comparison because all models are evaluated on observations not used during model fitting.
+
+More complex methods such as Ridge, Lasso and GAM did not provide a substantial improvement over logistic regression. Therefore, the stepwise logistic regression model was preferred because it provides a good balance between predictive performance, simplicity and interpretability.
+
+# Conclusions
+
+The analysis shows that claim occurrence is mainly associated with driving experience, vehicle characteristics, gender, annual mileage and postal code.
+
+The EDA initially suggested that age, income and credit score were important predictors. However, after fitting multivariable logistic models, these effects became much weaker. In particular, the apparent effect of age was largely explained by driving experience.
+
+The final stepwise logistic regression model achieved strong predictive performance on the test set and was preferred because it offered a good balance between accuracy and interpretability. Ridge, Lasso and GAM confirmed the main results, but did not provide a substantial improvement.
+
+Overall, the most relevant factors were driving experience, vehicle ownership, vehicle year, gender and annual mileage. The results should be interpreted as associations, not causal effects, since the dataset is observational.
+
+# Extra: Classification
+
+In addition to the inferential analysis, I also considered the problem as a classification task. The objective is to predict whether a policyholder will file a claim or not.
+
+Differently from the previous logistic regression analysis, the main goal here is not to interpret the coefficients, but to compare different classifiers in terms of predictive performance on the test set.
+
+```{r classification-setup}
+library(e1071)
+library(class)
+library(caret)
+
+# I use the main predictors selected by the logistic regression analysis.
+# This keeps the classification comparison consistent with the previous model.
+class_formula <- OUTCOME ~ DRIVING_EXPERIENCE +
+  GENDER +
+  VEHICLE_OWNERSHIP +
+  VEHICLE_YEAR +
+  MARRIED +
+  POSTAL_CODE +
+  ANNUAL_MILEAGE
+```
+
+## Logistic Regression Classifier
+
+```{r classification-logistic}
+log_class <- glm(
+  class_formula,
+  data = train,
+  family = binomial
+)
+
+prob_log <- predict(
+  log_class,
+  newdata = test,
+  type = "response"
+)
+
+pred_log <- ifelse(
+  prob_log > 0.5,
+  "Claim",
+  "No Claim"
+)
+
+pred_log <- factor(
+  pred_log,
+  levels = levels(test$OUTCOME)
+)
+
+conf_log <- confusionMatrix(
+  pred_log,
+  test$OUTCOME,
+  positive = "Claim"
+)
+
+conf_log
+```
+
+The logistic classifier achieved an accuracy of about 0.862 and a balanced accuracy of about 0.833. The model correctly identifies most `No Claim` observations and also detects a substantial proportion of true `Claim` cases.
+
+## Linear Discriminant Analysis
+
+LDA was used as a second classifier. It searches for a linear combination of the predictors that separates the two classes. It is useful to compare LDA with logistic regression because both methods produce a linear decision boundary.
+
+```{r classification-lda}
+lda_fit <- lda(
+  class_formula,
+  data = train
+)
+
+lda_pred <- predict(
+  lda_fit,
+  newdata = test
+)
+
+pred_lda <- lda_pred$class
+
+conf_lda <- confusionMatrix(
+  pred_lda,
+  test$OUTCOME,
+  positive = "Claim"
+)
+
+conf_lda
+```
+
+LDA obtained an accuracy of about 0.859 and a balanced accuracy of about 0.833. These results are very close to logistic regression, suggesting that a linear decision boundary is already adequate for this dataset.
+
+## Quadratic Discriminant Analysis
+
+QDA is more flexible than LDA because it allows each class to have its own covariance matrix. However, this also means that QDA needs to estimate more parameters and can become unstable when there are many categorical predictors or sparse categories.
+
+For QDA, POSTAL_CODE was excluded because it generates several dummy variables and contains sparse categories. This is problematic for QDA, since the method estimates a separate covariance matrix for each class and can become unstable when too many sparse dummy variables are included.
+
+```{r classification-qda}
+qda_formula <- OUTCOME ~ DRIVING_EXPERIENCE +
+  GENDER +
+  VEHICLE_OWNERSHIP +
+  VEHICLE_YEAR +
+  MARRIED +
+  ANNUAL_MILEAGE +
+  DUIS +
+  PAST_ACCIDENTS
+
+qda_fit <- qda(
+  qda_formula,
+  data = train
+)
+
+qda_pred <- predict(
+  qda_fit,
+  newdata = test
+)
+
+pred_qda <- qda_pred$class
+
+conf_qda <- confusionMatrix(
+  pred_qda,
+  test$OUTCOME,
+  positive = "Claim"
+)
+
+conf_qda
+```
+
+QDA performed worse than the other classifiers, with an accuracy of about 0.730. It achieved high sensitivity, meaning that it detected many true `Claim` cases, but its specificity was much lower. This means that QDA classified too many `No Claim` observations as `Claim`.
+
+Therefore, the additional flexibility of QDA did not improve the model. In this case, it produced too many false positives.
+
+## Naive Bayes
+
+Naive Bayes is a simple probabilistic classifier. It assumes that the predictors are conditionally independent given the class. This assumption is quite strong and is probably not fully realistic for this dataset, since variables such as driving experience, past accidents and annual mileage may be related.
+
+```{r classification-naive-bayes}
+nb_fit <- naiveBayes(
+  class_formula,
+  data = train
+)
+
+pred_nb <- predict(
+  nb_fit,
+  newdata = test,
+  type = "class"
+)
+
+conf_nb <- confusionMatrix(
+  pred_nb,
+  test$OUTCOME,
+  positive = "Claim"
+)
+
+conf_nb
+```
+
+Naive Bayes achieved an accuracy of about 0.835 and a balanced accuracy of about 0.802. This result may be explained by the strong independence assumption, which is likely too restrictive for this dataset.
+
+## k-Nearest Neighbors
+
+k-NN is a non-parametric method based on distances between observations. A new observation is classified according to the classes of the most similar observations in the training set.
+
+Since k-NN is based on distances, scaling is necessary. Without scaling, variables with larger numerical ranges, such as `ANNUAL_MILEAGE`, would dominate the distance calculation. The scaling parameters are computed on the training set and then applied to the test set in order to avoid data leakage.
+
+```{r classification-knn-preparation}
+x_all_class <- model.matrix(
+  class_formula,
+  data = data_clean
+)[, -1]
+
+x_train_class <- x_all_class[train_id, ]
+x_test_class  <- x_all_class[-train_id, ]
+
+# Scale the training set.
+x_train_scaled <- scale(x_train_class)
+
+# Apply the same scaling to the test set.
+x_test_scaled <- scale(
+  x_test_class,
+  center = attr(x_train_scaled, "scaled:center"),
+  scale = attr(x_train_scaled, "scaled:scale")
+)
+
+y_train_class <- data_clean$OUTCOME[train_id]
+y_test_class  <- data_clean$OUTCOME[-train_id]
+```
+
+Different values of $k$ were tested from 1 to 50. Small values of $k$ make the model more flexible but also noisier. Larger values of $k$ make the model more stable, but potentially too rigid.
+
+```{r classification-knn-k, fig.cap="k-NN accuracy for different values of k."}
+set.seed(123)
+
+max_k <- 50
+acc_knn <- numeric(max_k)
+
+for (k in 1:max_k) {
+  pred_knn_tmp <- knn(
+    train = x_train_scaled,
+    test = x_test_scaled,
+    cl = y_train_class,
+    k = k
+  )
+  
+  acc_knn[k] <- mean(pred_knn_tmp == y_test_class)
+}
+
+plot(
+  1:max_k,
+  acc_knn,
+  type = "b",
+  xlab = "k",
+  ylab = "Accuracy",
+  main = "k-NN Accuracy vs k"
+)
+
+best_k <- which.max(acc_knn)
+best_k
+max(acc_knn)
+```
+
+The best value was $k = 37$, with an accuracy of about 0.868. The plot shows that accuracy increases quickly for small values of $k$ and then stabilizes for intermediate values.
+
+```{r classification-knn-final}
+pred_knn <- knn(
+  train = x_train_scaled,
+  test = x_test_scaled,
+  cl = y_train_class,
+  k = best_k
+)
+
+conf_knn <- confusionMatrix(
+  pred_knn,
+  y_test_class,
+  positive = "Claim"
+)
+
+conf_knn
+```
+
+k-NN achieved the highest accuracy among the tested classifiers, about 0.867, and also the highest balanced accuracy, about 0.846.
+
+## Classification Model Comparison
+
+The following table compares the classifiers using accuracy, balanced accuracy, sensitivity and specificity.
+
+```{r classification-results}
+classification_results <- data.frame(
+  Model = c(
+    "Logistic Regression",
+    "LDA",
+    "QDA",
+    "Naive Bayes",
+    paste0("k-NN (k = ", best_k, ")")
+  ),
+  Accuracy = c(
+    conf_log$overall["Accuracy"],
+    conf_lda$overall["Accuracy"],
+    conf_qda$overall["Accuracy"],
+    conf_nb$overall["Accuracy"],
+    conf_knn$overall["Accuracy"]
+  ),
+  Balanced_Accuracy = c(
+    conf_log$byClass["Balanced Accuracy"],
+    conf_lda$byClass["Balanced Accuracy"],
+    conf_qda$byClass["Balanced Accuracy"],
+    conf_nb$byClass["Balanced Accuracy"],
+    conf_knn$byClass["Balanced Accuracy"]
+  ),
+  Sensitivity = c(
+    conf_log$byClass["Sensitivity"],
+    conf_lda$byClass["Sensitivity"],
+    conf_qda$byClass["Sensitivity"],
+    conf_nb$byClass["Sensitivity"],
+    conf_knn$byClass["Sensitivity"]
+  ),
+  Specificity = c(
+    conf_log$byClass["Specificity"],
+    conf_lda$byClass["Specificity"],
+    conf_qda$byClass["Specificity"],
+    conf_nb$byClass["Specificity"],
+    conf_knn$byClass["Specificity"]
+  )
+) %>%
+  mutate(
+    Accuracy = round(Accuracy, 3),
+    Balanced_Accuracy = round(Balanced_Accuracy, 3),
+    Sensitivity = round(Sensitivity, 3),
+    Specificity = round(Specificity, 3)
+  )
+
+knitr::kable(
+  classification_results,
+  caption = "Comparison of classification models on the test set"
+)
+```
+
+Overall, all models except QDA achieved good classification performance. Logistic regression and LDA produced almost identical results, suggesting that a linear decision boundary is sufficient for this dataset. Naive Bayes performed slightly worse, probably because its independence assumption is too strong. QDA was the weakest model because it predicted too many `Claim` cases and therefore reduced specificity.
+
+The best predictive performance was achieved by k-NN. However, since the main goal of this project is to understand which factors are associated with claim occurrence, logistic regression remains the most suitable model. It provides good predictive performance and, at the same time, allows interpretation through Odds Ratios.
+
+# Future Improvements
+
+Future improvements could focus on a better treatment of missing values, using imputation instead of removing incomplete observations.
+
+A second improvement concerns POSTAL_CODE. In this project, one postal code was associated only with claim observations, producing an unstable and extremely large estimate. Future work could handle this variable more carefully, for example by grouping rare postal codes, removing unstable categories.
