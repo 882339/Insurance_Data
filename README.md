@@ -23,6 +23,3 @@ Il dataset utilizzato per questo progetto è **Car Insurance Data** ed è pubbli
 * **Linguaggio:** R
 * **Ambiente:** RStudio / R Markdown
 * **Librerie Principali:** `tidyverse` (per manipolazione dati e plot), `ISLR` / `MASS` / `caret` (per i modelli statistici), `car` (per test VIF e diagnostica).
-
-## 📝 Autore
-* **Alessandro** - Studente di Computer Science and Information Technology.
